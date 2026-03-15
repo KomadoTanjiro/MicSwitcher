@@ -1,0 +1,8 @@
+{
+  "sound_volume_view_path": "SoundVolumeView.exe",
+  "hotkey": "ctrl+alt+m",
+  "set_default_mode": "all",
+  "log_file": "mic_switcher.log",
+  "selected_mic_1": "",
+  "selected_mic_2": ""
+}
