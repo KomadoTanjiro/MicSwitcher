@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+build/
+dist/
+app/
+
+*.spec
+
+config.json
+mic_switcher.log
+
+.idea/
+.vscode/
