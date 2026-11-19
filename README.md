@@ -1,26 +1,123 @@
-# MicSwitcher
+# MicSwitcher - переключатель звука для Windows
 
-MicSwitcher is a small Windows tray utility for quickly switching between two microphones using a global hotkey.
+Утилита в системном трее для быстрой смены звука в Windows:
 
-## Features
+- **Ctrl + Alt + M** - микрофон: Mic 1 и Mic 2;
+- **Ctrl + Alt + O** - вывод (наушники, колонки): Out 1 и Out 2;
+- **Ctrl + Alt + P** - следующий профиль: микрофон + вывод + эквалайзер одним нажатием;
+- **эквалайзер** для вывода и микрофона через Equalizer APO: работает во всех программах (Discord, Steam, OBS, игры).
 
-- Automatically detects active microphone devices
-- Lets you choose **Mic 1** and **Mic 2** from the tray menu
-- Switches between selected microphones with a global hotkey
-- Supports auto-start with Windows
-- Creates `config.json` automatically on first launch
+Устройства меняются через звуковую систему Windows (Core Audio), поэтому подхватываются любыми программами, где выбрано устройство «По умолчанию». Подключили или выдернули устройство - меню обновится само.
 
-## Default hotkey
+## Первый запуск
 
-`Ctrl + Alt + M`
+1. Установить Python 3.11+ (с галочкой «Add python.exe to PATH» и лаунчером `py`).
+2. Склонировать репозиторий и поставить зависимости:
 
-## Requirements
+   ```bat
+   git clone https://github.com/KomadoTanjiro/MicSwitcher
+   cd MicSwitcher
+   py -m pip install -r requirements.txt
+   ```
 
-- Windows
-- Python 3.11+ to run from source
-- `SoundVolumeView.exe` placed next to the script or executable
+3. Запустить без консоли:
 
-## Install dependencies
+   ```bat
+   pyw mic_switcher_tray.py
+   ```
 
-```bash
-py -m pip install -r requirements.txt
+4. В трее появится синяя иконка с микрофоном. Mic 1/2 и Out 1/2 выберутся сами (первые два по алфавиту). Поменять: правый клик по иконке, «Микрофон» / «Вывод», «Выбрать ...».
+5. По желанию: в меню «Автозапуск», чтобы стартовать вместе с Windows.
+
+## Профили
+
+1. Включи нужные микрофон, вывод и пресеты эквалайзера.
+2. Меню «Профиль», «Сохранить текущее как профиль...», ввести название.
+3. Переключение: **Ctrl + Alt + P** по кругу или пункт меню. Свой хоткей профилю - поле `"hotkey"` в `config.json`, например `"ctrl+alt+1"`, затем «Перечитать config.json».
+
+## Эквалайзер
+
+1. Установить Equalizer APO (бесплатный, sourceforge.net/projects/equalizerapo) и в его Configurator отметить наушники, колонки и микрофоны, затем перезагрузиться.
+2. Меню «Эквалайзер», «Вывод» или «Микрофон», выбрать пресет. Пресет применяется к текущему устройству и переезжает вместе с ним при переключении.
+
+Встроенные пресеты:
+
+| Вывод | Микрофон |
+|---|---|
+| Бас, Чистый голос, Игры: шаги, Мягкий | Голос, Шумодав, Голос + шумодав, Убрать гул, Радио |
+
+### Шумодав
+
+Убирает клавиатуру, вентилятор, улицу из микрофона во всех программах. Работает на бесплатном плагине RNNoise внутри Equalizer APO.
+
+1. Скачать архив Windows со страницы github.com/werman/noise-suppression-for-voice/releases.
+2. Распаковать в `C:\Program Files\EqualizerAPO\VSTPlugins\` (нужны права администратора). Именно туда: Equalizer APO работает внутри системной службы и не видит файлы из папок пользователя вроде «Загрузок».
+3. Меню «Эквалайзер», «Микрофон», «Шумодав» или «Голос + шумодав». MicSwitcher сам найдёт `rnnoise_stereo.dll` (x64 в приоритете). Если плагин лежит в другом месте - путь в `"rnnoise_vst_path"`.
+
+Порог: меню «Эквалайзер», «Порог шумодава». Звук глушится, когда вероятность голоса ниже порога: выше порог - тише фон между словами, но могут глотаться тихие слова. Автор плагина советует 85-95%, по умолчанию у плагина 60%, 0% - только шумоподавление без отсечки.
+
+Автор плагина рекомендует частоту микрофона 48000 Гц: «Параметры звука», микрофон, «Свойства», «Дополнительно». Шумодав в Discord (Krisp) при этом лучше выключить.
+
+Свои пресеты - в `config.json`, командами Equalizer APO:
+
+```json
+"eq_custom_presets": {
+  "Мой бас": {"target": "out", "lines": ["Preamp: -8 dB", "Filter: ON LSC Fc 90 Hz Gain 8 dB Q 0.7"]}
+}
+```
+
+MicSwitcher не трогает настройки Equalizer APO: пишет свой `MicSwitcher.txt` в его папку `config` и один раз дописывает в `config.txt` строку `Include: MicSwitcher.txt`. Если в Discord включено своё шумоподавление, а у микрофона пресет «Голос», звук обработается дважды: оставь что-то одно.
+
+Конфиг от старой версии (с SoundVolumeView) подхватится сам: выбранные микрофоны переведутся на новые ID при первом запуске.
+
+## Если переключение не работает
+
+Переключение использует недокументированный интерфейс Windows. Если после обновления Windows он перестанет работать, можно включить запасной вариант:
+
+1. Скачать NirSoft SoundVolumeView и положить `SoundVolumeView.exe` рядом с MicSwitcher.
+2. В `config.json` поставить `"audio_backend": "svv"` и выбрать в меню «Перечитать config.json».
+
+При `"audio_backend": "auto"` (по умолчанию) MicSwitcher сам перейдёт на SoundVolumeView, если Core Audio не запустился, а exe лежит рядом.
+
+## Сборка exe
+
+```bat
+build.bat
+```
+
+Готовый файл: `dist\MicSwitcher.exe`. Папка с exe должна быть доступна на запись: туда пишутся `config.json` и `mic_switcher.log`.
+
+## Тесты
+
+```bat
+py -m unittest -v
+```
+
+112 тестов на логику: конфиг, Core Audio на фейковом COM, SoundVolumeView на фейковом CSV, слоты, переключение, профили, эквалайзер, хоткеи, автообновление, автозапуск. Идут на любой ОС. Трей, хоткей и настоящий звук проверяются вручную на Windows, сценарий в [docs/03-development.md](docs/03-development.md#ручная-проверка).
+
+## Где что
+
+```text
+mic_switcher_tray.py      приложение: трей, меню, хоткеи, слоты, профили, автообновление, popup, автозапуск
+profiles.py               профили: загрузка, поиск, перебор, сохранение
+equalizer.py              Equalizer APO: пресеты, MicSwitcher.txt, Include в config.txt
+audio_devices/__init__.py Device, роли, выбор реализации (open_backend)
+audio_devices/core.py     Core Audio через pycaw/comtypes, основная реализация
+audio_devices/svv.py      SoundVolumeView.exe, запасная реализация
+tests/                    юнит-тесты (unittest, без Windows)
+config.example.json       пример конфига (= DEFAULT_CONFIG в коде)
+build.bat                 сборка exe через PyInstaller
+MicSwitcher.ico           иконка для exe
+```
+
+## Документация
+
+- [Требования к продукту](docs/01-product.md)
+- [Архитектура](docs/02-architecture.md)
+- [Правила разработки](docs/03-development.md)
+- [Дизайн](docs/04-design.md)
+- [Задачи](docs/05-tasks.md)
+
+## Лицензия
+
+MIT, см. [LICENSE](LICENSE).

@@ -1,4 +1,6 @@
 keyboard
 pystray
 Pillow
+pycaw
+comtypes
 pyinstaller
