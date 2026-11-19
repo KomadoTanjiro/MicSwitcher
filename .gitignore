@@ -10,7 +10,9 @@ app/
 *.spec
 
 config.json
+config.json.broken
 mic_switcher.log
+mic_switcher.log.1
 
 .idea/
 .vscode/
