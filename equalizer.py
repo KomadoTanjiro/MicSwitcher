@@ -253,6 +253,12 @@ def resolve_commands(commands, rnnoise_path, threshold=None):
     return result
 
 
+def _is_vst2(path):
+    """В релизе RNNoise dll с тем же именем есть и в .lv2 - это другой формат."""
+    parts = os.path.normpath(path).lower().split(os.sep)
+    return not any(p.endswith(".lv2") or p == "ladspa" for p in parts)
+
+
 def _rnnoise_rank(path):
     """Стерео-версия лучше моно, x64 лучше x86, путь короче - лучше."""
     lower = path.lower()
@@ -278,6 +284,7 @@ def find_rnnoise(config_dir, override="", max_depth=4):
         if depth >= max_depth:
             dirs[:] = []
         for name in files:
-            if name.lower() in RNNOISE_FILES:
-                found.append(os.path.join(folder, name))
+            path = os.path.join(folder, name)
+            if name.lower() in RNNOISE_FILES and _is_vst2(path):
+                found.append(path)
     return min(found, key=_rnnoise_rank) if found else None

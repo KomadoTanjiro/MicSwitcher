@@ -31,12 +31,26 @@ jobs:
       - name: Build exe
         run: python -m PyInstaller --noconfirm --noconsole --onefile --name MicSwitcher --icon MicSwitcher.ico --hidden-import audio_devices.core --hidden-import audio_devices.svv mic_switcher_tray.py
 
+      - name: Bundle RNNoise plugin
+        shell: pwsh
+        run: |
+          python -c "import installer as i; i.extract_rnnoise(i.download(i.RNNOISE_ZIP_URL, i.RNNOISE_ZIP_SHA256, 'win-rnnoise.zip'), 'bundle/plugins/rnnoise')"
+          curl.exe -sSfL -o bundle/plugins/rnnoise/LICENSE-GPL-3.0.txt https://raw.githubusercontent.com/werman/noise-suppression-for-voice/v1.10/LICENSE
+          $source = python -c "import installer as i; print(i.RNNOISE_SOURCE_URL)"
+          @(
+            "RNNoise noise suppression for voice v1.10 (VST2), werman/noise-suppression-for-voice.",
+            "Unmodified binaries, distributed under GPL-3.0 (LICENSE-GPL-3.0.txt).",
+            "Source code: $source",
+            "MicSwitcher copies these files into <Equalizer APO>\VSTPlugins\RNNoise when noise suppression is enabled."
+          ) | Out-File -Encoding utf8 bundle/plugins/rnnoise/README.txt
+
       - name: Package
         shell: pwsh
         run: |
           $name = "MicSwitcher_portable_${{ github.ref_name }}"
           New-Item -ItemType Directory -Path $name | Out-Null
           Copy-Item dist/MicSwitcher.exe, README.md, LICENSE, config.example.json -Destination $name
+          Copy-Item -Recurse bundle/plugins -Destination $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           "ZIP=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
