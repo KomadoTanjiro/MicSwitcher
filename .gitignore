@@ -16,3 +16,6 @@ mic_switcher.log.1
 
 .idea/
 .vscode/
+bundle/
+win-rnnoise.zip
+plugins/

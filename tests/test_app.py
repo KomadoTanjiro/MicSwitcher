@@ -18,6 +18,10 @@ PHONES = ad.Device("{0.0.0.00000000}.{11111111-1111-1111-1111-111111111111}", "�
 SPEAKERS = ad.Device("{0.0.0.00000000}.{22222222-2222-2222-2222-222222222222}", "Динамики", "Realtek", ad.RENDER)
 
 
+def installer_error(text):
+    return ms.installer.InstallError(text)
+
+
 class FakeBackend:
     name = "Fake"
     watchable = True
@@ -369,14 +373,55 @@ class EqualizerTests(Base):
         self.assertEqual(self.popup_texts()[-1], "Порог шумодава: По умолчанию плагина (60%)")
         self.assertNotIn("ChunkData", self.eq_text())
 
-    def test_noise_suppression_without_plugin(self):
+    def run_sync(self):
+        p = mock.patch.object(ms, "start_background", side_effect=lambda fn, *a: fn(*a))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def fake_install(self, app_dir, config_dir):
+        path = os.path.join(os.path.dirname(config_dir), "VSTPlugins", "RNNoise", "rnnoise_stereo.dll")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        return path
+
+    def test_noise_preset_installs_plugin_automatically(self):
         self.install_eq()
+        self.run_sync()
+        with mock.patch("installer.install_rnnoise", side_effect=self.fake_install) as install:
+            ms.set_eq(MIC, "Шумодав")
+        install.assert_called_once_with(ms.APP_DIR, self.eq_dir)
+        self.assertIn('rnnoise_stereo.dll"', self.eq_text())
+        self.assertEqual(self.popup_texts()[-1], "Шумодав установлен.")
+
+    def test_noise_install_failure_keeps_other_presets(self):
+        self.install_eq()
+        self.run_sync()
         ms.set_eq(OUT, "Бас")
-        ms.set_eq(MIC, "Шумодав")
-        self.assertIn("плагин RNNoise не найден", self.popup_texts()[-1])
-        text = self.eq_text()
-        self.assertNotIn("VSTPlugin", text)
-        self.assertIn("Бас", text)
+        with mock.patch("installer.install_rnnoise", side_effect=installer_error("Установка отменена")):
+            ms.set_eq(MIC, "Шумодав")
+        self.assertIn("Не удалось установить шумодав: Установка отменена", self.popup_texts()[-1])
+        self.assertNotIn("VSTPlugin", self.eq_text())
+        self.assertIn("Бас", self.eq_text())
+        self.assertIn("плагин RNNoise не установлен", ms.apply_equalizer())
+
+    def test_noise_preset_without_equalizer_apo(self):
+        self.run_sync()
+        with mock.patch("installer.install_rnnoise") as install:
+            ms.set_eq(MIC, "Шумодав")
+        install.assert_not_called()
+        self.assertIn("Установить Equalizer APO", self.popup_texts()[-1])
+
+    def test_install_equalizer_apo_runs_installer(self):
+        with mock.patch("installer.download_equalizer_apo", return_value=r"C:\tmp\EqualizerAPO.exe"), \
+                mock.patch.object(ms.os, "startfile", create=True) as start:
+            ms.install_equalizer_apo()
+        start.assert_called_once_with(r"C:\tmp\EqualizerAPO.exe")
+        self.assertIn("Configurator", self.popup_texts()[-1])
+
+    def test_parallel_install_refused(self):
+        with ms.install_lock:
+            ms.install_noise_suppression()
+        self.assertEqual(self.popup_texts()[-1], "Установка уже идет.")
 
     def test_write_error_reported(self):
         self.install_eq()
@@ -543,6 +588,66 @@ class WatchTests(Base):
         with mock.patch("threading.Thread") as thread:
             ms.start_watcher()
         thread.assert_not_called()
+
+
+class PanelStateTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.select_all()
+        self.backend.defaults[(ad.CAPTURE, 0)] = "{desk}"
+        self.backend.defaults[(ad.RENDER, 0)] = PHONES.id
+        p = mock.patch.object(ms, "is_autorun_enabled", return_value=True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_state(self):
+        ms.CONFIG["profiles"] = [{"name": "Стрим", "hotkey": "ctrl+alt+1"}]
+        ms.CONFIG.update(active_profile="Стрим", eq_mic="Голос")
+        state = ms.panel_state()
+        mic, out = state["kinds"]
+        self.assertEqual(mic["key"], "mic")
+        self.assertEqual(mic["current"], "Mic 2, Desk Mic — USB Audio")
+        self.assertEqual(mic["slots"], {1: "{headset}", 2: "{desk}"})
+        self.assertEqual([d["label"] for d in out["devices"]], ["Динамики — Realtek", "Наушники — Jabra"])
+        self.assertEqual(out["hotkey"], "ctrl+alt+o")
+        self.assertEqual(state["profiles"], [{"name": "Стрим", "hotkey": "ctrl+alt+1"}])
+        self.assertEqual(state["profile_name_suggestion"], "Наушники + Desk Mic")
+        self.assertFalse(state["eq"]["found"])
+        self.assertEqual(state["eq"]["kinds"]["mic"]["current"], "Голос")
+        self.assertEqual(state["eq"]["kinds"]["out"]["presets"][0], ("off", "Выкл"))
+        self.assertEqual(state["eq"]["threshold"], None)
+        self.assertEqual(state["hotkeys"], {"hotkey": "ctrl+alt+m", "hotkey_out": "ctrl+alt+o", "hotkey_profile": "ctrl+alt+p"})
+        self.assertTrue(state["autorun"])
+        json.dumps(state)
+
+    def test_set_hotkeys(self):
+        ms.keyboard.add_hotkey.side_effect = lambda combo, fn, args: combo
+        ms.set_hotkeys({"hotkey": " ctrl+shift+m ", "hotkey_out": "", "hotkey_profile": "ctrl+alt+p"})
+        self.assertEqual(self.saved_config()["hotkey"], "ctrl+shift+m")
+        self.assertEqual(ms.hotkey_handles, ["ctrl+shift+m", "ctrl+alt+p"])
+        self.assertEqual(self.popup_texts()[-1], "Хоткеи сохранены.")
+
+    def test_set_profile_hotkey(self):
+        ms.CONFIG["profiles"] = [{"name": "Стрим", "mic": "{desk}"}]
+        ms.set_profile_hotkey("стрим", "ctrl+alt+9")
+        saved = self.saved_config()["profiles"][0]
+        self.assertEqual((saved["name"], saved["mic"], saved["hotkey"]), ("Стрим", "{desk}", "ctrl+alt+9"))
+        ms.set_profile_hotkey("нет такого", "x")
+
+    def test_set_auto_refresh(self):
+        with mock.patch("threading.Thread") as thread:
+            ms.set_auto_refresh(False)
+            thread.assert_not_called()
+            ms.set_auto_refresh(True)
+            thread.assert_called_once()
+        self.assertTrue(self.saved_config()["auto_refresh"])
+
+    def test_panel_actions_map_kind_keys(self):
+        actions = ms.panel_actions()
+        actions.toggle("out")
+        self.assertEqual(self.backend.set_calls[0][0], SPEAKERS.id)
+        actions.set_eq("mic", "Радио")
+        self.assertEqual(ms.CONFIG["eq_mic"], "Радио")
 
 
 class AutorunTests(Base):

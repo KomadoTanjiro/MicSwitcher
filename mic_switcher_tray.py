@@ -1,5 +1,6 @@
 import copy
 import ctypes
+import dataclasses
 import json
 import os
 import queue
@@ -9,6 +10,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.simpledialog
+import types
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -22,6 +24,8 @@ import pystray
 from PIL import Image, ImageDraw
 
 import equalizer
+import installer
+import panel as panel_ui
 import profiles as prof
 from audio_devices import CAPTURE, RENDER, open_backend, parse_roles
 
@@ -50,6 +54,7 @@ class Kind:
 MIC = Kind("mic", CAPTURE, "Mic", "Микрофон", "микрофон", "микрофонов", "hotkey")
 OUT = Kind("out", RENDER, "Out", "Вывод", "вывод", "устройств вывода", "hotkey_out")
 KINDS = (MIC, OUT)
+KIND_BY_KEY = {kind.key: kind for kind in KINDS}
 
 DEFAULT_CONFIG = {
     "audio_backend": "auto",
@@ -92,10 +97,12 @@ LOG_FILE = os.path.join(APP_DIR, DEFAULT_CONFIG["log_file"])
 backend = None
 icon = None
 hotkey_handles = []
+panel = None
 watch_stop = threading.Event()
 _last_toggle = {}
 
 switch_lock = threading.Lock()
+install_lock = threading.Lock()
 config_lock = threading.Lock()
 log_lock = threading.Lock()
 cache_lock = threading.Lock()
@@ -194,6 +201,7 @@ class PopupManager:
         self._queue = queue.Queue()
         self._thread = None
         self._lock = threading.Lock()
+        self.root = None
 
     def _ensure_thread(self):
         with self._lock:
@@ -205,6 +213,11 @@ class PopupManager:
         self._ensure_thread()
         self._queue.put(("popup", title, message, duration_ms))
 
+    def call(self, fn, *args):
+        """Выполнить fn(*args) в потоке tkinter (там живут все окна)."""
+        self._ensure_thread()
+        self._queue.put(("call", fn, args))
+
     def ask(self, title, prompt, initial, callback):
         """Окно ввода строки. callback(текст или None) вызывается в отдельном потоке."""
         self._ensure_thread()
@@ -214,6 +227,7 @@ class PopupManager:
         try:
             root = tk.Tk()
             root.withdraw()
+            self.root = root
         except Exception as e:
             log(f"Не удалось показать popup: {e}")
             return
@@ -226,6 +240,11 @@ class PopupManager:
                     item = self._queue.get_nowait()
                     if item[0] == "ask":
                         self._ask(root, *item[1:])
+                    elif item[0] == "call":
+                        try:
+                            item[1](*item[2])
+                        except Exception as e:
+                            log(f"Ошибка в окне: {e}")
                     else:
                         self._render(root, current, *item[1:])
             except queue.Empty:
@@ -640,10 +659,7 @@ def apply_equalizer():
             continue
         commands = equalizer.resolve_commands(commands, rnnoise_path(config_dir), rnnoise_threshold())
         if commands is None:
-            problems.append(
-                f"Шумодав: плагин RNNoise не найден. Распакуй rnnoise_stereo.dll в папку "
-                f"VSTPlugins Equalizer APO или укажи rnnoise_vst_path в config.json."
-            )
+            problems.append("Шумодав: плагин RNNoise не установлен.")
             continue
         pattern = equalizer.device_pattern(device.id, device.name)
         sections.append((kind.title, device.label, pattern, preset, commands))
@@ -659,7 +675,61 @@ def set_eq(kind, preset):
     CONFIG[eq_key(kind)] = preset
     save_config()
     refresh_menu()
-    report_all([f"Эквалайзер ({kind.noun}): {equalizer.preset_label(preset)}", apply_equalizer()])
+    config_dir = eq_config_dir()
+    if kind is MIC and mic_uses_rnnoise() and config_dir and rnnoise_path(config_dir) is None:
+        # Шумодав выбран, плагина нет: ставим сами, popup будет по итогам установки.
+        start_background(install_noise_suppression)
+        return
+    problem = apply_equalizer()
+    if config_dir is None and preset != equalizer.OFF:
+        problem = "Equalizer APO не установлен: меню «Эквалайзер», «Установить Equalizer APO»."
+    report_all([f"Эквалайзер ({kind.noun}): {equalizer.preset_label(preset)}", problem])
+
+
+def start_background(fn, *args):
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def install_noise_suppression():
+    """Ставит плагин RNNoise в папку Equalizer APO (при нужде - с окном UAC)."""
+    if not install_lock.acquire(blocking=False):
+        report("Установка уже идет.", show_popup_flag=True)
+        return
+    try:
+        config_dir = eq_config_dir()
+        if config_dir is None:
+            report("Сначала установи Equalizer APO.", show_popup_flag=True, timeout=5)
+            return
+        report("Устанавливаю шумодав RNNoise... Windows может спросить права администратора.", show_popup_flag=True, timeout=5)
+        path = installer.install_rnnoise(APP_DIR, config_dir)
+        log(f"RNNoise установлен: {path}")
+        refresh_menu()
+        report_all(["Шумодав установлен.", apply_equalizer()])
+    except Exception as e:
+        report(f"Не удалось установить шумодав: {e}", show_popup_flag=True, timeout=6)
+    finally:
+        install_lock.release()
+
+
+def install_equalizer_apo():
+    """Скачивает установщик Equalizer APO (версия и хэш закреплены) и запускает его."""
+    if not install_lock.acquire(blocking=False):
+        report("Установка уже идет.", show_popup_flag=True)
+        return
+    try:
+        report(f"Скачиваю Equalizer APO {installer.EQAPO_VERSION}...", show_popup_flag=True, timeout=5)
+        path = installer.download_equalizer_apo()
+        os.startfile(path)
+        report(
+            "Запущен установщик Equalizer APO. В конце он откроет Configurator: отметь наушники "
+            "и микрофоны, затем перезагрузи компьютер. Шумодав MicSwitcher поставит сам.",
+            show_popup_flag=True,
+            timeout=10,
+        )
+    except Exception as e:
+        report(f"Не удалось установить Equalizer APO: {e}", show_popup_flag=True, timeout=6)
+    finally:
+        install_lock.release()
 
 
 def open_target(target):
@@ -943,6 +1013,151 @@ def open_log():
         report(f"Не удалось открыть лог: {e}", show_popup_flag=True, timeout=5)
 
 
+# --- Панель настроек ---------------------------------------------------------
+
+def device_options(kind):
+    return [{"id": d.id, "label": d.label} for d in get_devices(kind)]
+
+
+def panel_state():
+    """Снимок всего, что показывает панель. Вызывается в фоновом потоке."""
+    kinds = []
+    for kind in KINDS:
+        current = find_device(kind, get_current_id(kind))
+        slot = next((s for s in SLOTS if current and get_selected(kind, s) == current.id), None)
+        current_text = "не определен"
+        if current:
+            current_text = f"{kind.short} {slot}, {current.label}" if slot else current.label
+        kinds.append(
+            {
+                "key": kind.key,
+                "title": kind.title,
+                "short": kind.short,
+                "devices": device_options(kind),
+                "slots": {s: get_selected(kind, s) for s in SLOTS},
+                "current": current_text,
+                "hotkey": str(CONFIG.get(kind.hotkey_key) or ""),
+            }
+        )
+
+    config_dir = eq_config_dir()
+    out_device = find_device(OUT, get_current_id(OUT))
+    mic_device = find_device(MIC, get_current_id(MIC))
+    return {
+        "backend": backend.name,
+        "watchable": backend.watchable,
+        "kinds": kinds,
+        "profiles": [{"name": p.name, "hotkey": p.hotkey} for p in get_profiles()],
+        "active_profile": CONFIG.get("active_profile", ""),
+        "profile_name_suggestion": prof.auto_name(
+            out_device.name if out_device else "", mic_device.name if mic_device else ""
+        ),
+        "eq": {
+            "found": config_dir is not None,
+            "dir": config_dir,
+            "download_url": equalizer.DOWNLOAD_URL,
+            "rnnoise_url": equalizer.RNNOISE_URL,
+            "rnnoise": rnnoise_path(config_dir) if config_dir else None,
+            "kinds": {
+                kind.key: {
+                    "presets": [(name, equalizer.preset_label(name)) for name in [equalizer.OFF] + list(eq_presets(kind))],
+                    "current": CONFIG.get(eq_key(kind), equalizer.OFF),
+                }
+                for kind in KINDS
+            },
+            "thresholds": [(v, equalizer.threshold_label(v)) for v in equalizer.RNNOISE_THRESHOLDS],
+            "threshold": rnnoise_threshold(),
+        },
+        "hotkeys": {key: str(CONFIG.get(key) or "") for key, _ in panel_ui.HOTKEY_FIELDS},
+        "autorun": is_autorun_enabled(),
+        "auto_refresh": bool(CONFIG.get("auto_refresh")),
+    }
+
+
+def set_hotkeys(values):
+    for key, _ in panel_ui.HOTKEY_FIELDS:
+        if key in values:
+            CONFIG[key] = str(values[key] or "").strip()
+    save_config()
+    errors = register_hotkeys()
+    refresh_menu()
+    report_all(["Хоткеи сохранены.", *errors])
+
+
+def set_profile_hotkey(name, combo):
+    items = get_profiles()
+    profile = prof.find(items, name)
+    if profile is None:
+        return
+    set_profiles(prof.upsert(items, dataclasses.replace(profile, hotkey=str(combo or "").strip())))
+    errors = register_hotkeys()
+    refresh_menu()
+    hint = combo if combo else "без хоткея"
+    report_all([f"Профиль «{profile.name}»: {hint}", *errors])
+
+
+def set_auto_refresh(enabled):
+    CONFIG["auto_refresh"] = bool(enabled)
+    save_config()
+    stop_watcher()
+    start_watcher()
+    report("Слежение за устройствами " + ("включено." if enabled else "выключено."), show_popup_flag=True)
+
+
+def record_hotkey():
+    return keyboard.read_hotkey(suppress=False)
+
+
+def panel_actions():
+    by_key = KIND_BY_KEY.__getitem__
+    return types.SimpleNamespace(
+        state=panel_state,
+        call_ui=popups.call,
+        select_device=lambda k, slot, device_id: select_device(by_key(k), slot, device_id),
+        activate_slot=lambda k, slot: activate_slot(by_key(k), slot),
+        toggle=lambda k: toggle(by_key(k)),
+        apply_profile=apply_profile,
+        save_profile_named=save_profile_named,
+        delete_profile=delete_profile,
+        set_profile_hotkey=set_profile_hotkey,
+        set_eq=lambda k, preset: set_eq(by_key(k), preset),
+        set_rnnoise_threshold=set_rnnoise_threshold,
+        set_hotkeys=set_hotkeys,
+        set_autorun=set_autorun,
+        set_auto_refresh=set_auto_refresh,
+        record_hotkey=record_hotkey,
+        open_target=open_target,
+        install_equalizer_apo=install_equalizer_apo,
+        install_noise_suppression=install_noise_suppression,
+        open_config=open_config,
+        open_log=open_log,
+        reload_config=reload_config,
+    )
+
+
+def _open_panel_ui():
+    """В потоке tkinter: одна панель на приложение, повторный вызов - поднять окно."""
+    global panel
+    if panel is not None and not panel.closed:
+        panel.show()
+        return
+    panel = panel_ui.Panel(popups.root, panel_actions())
+    panel.show()
+
+
+def open_panel():
+    popups.call(_open_panel_ui)
+
+
+def refresh_panel():
+    def refresh():
+        if panel is not None and not panel.closed:
+            panel.request_refresh()
+
+    if panel is not None:
+        popups.call(refresh)
+
+
 # --- Трей --------------------------------------------------------------------
 
 def create_image():
@@ -1067,17 +1282,19 @@ def build_eq_menu():
     items.append(pystray.MenuItem("Порог шумодава", build_threshold_menu()))
     items.append(pystray.Menu.SEPARATOR)
     if config_dir is None:
-        items.append(pystray.MenuItem("Скачать Equalizer APO", menu_action(open_target, equalizer.DOWNLOAD_URL)))
+        items.append(pystray.MenuItem("Установить Equalizer APO", menu_action(start_background, install_equalizer_apo)))
     else:
         items.append(pystray.MenuItem("Открыть папку Equalizer APO", menu_action(open_target, config_dir)))
         if rnnoise_path(config_dir) is None:
-            items.append(pystray.MenuItem("Скачать шумодав RNNoise", menu_action(open_target, equalizer.RNNOISE_URL)))
+            items.append(pystray.MenuItem("Установить шумодав RNNoise", menu_action(start_background, install_noise_suppression)))
     return pystray.Menu(*items)
 
 
 def build_menu():
     active = CONFIG.get("active_profile") or "нет"
     return pystray.Menu(
+        pystray.MenuItem("Панель настроек...", menu_action(open_panel), default=True),
+        pystray.Menu.SEPARATOR,
         *[
             pystray.MenuItem(f"Переключить {kind.noun}{hotkey_hint(CONFIG.get(kind.hotkey_key))}", menu_action(toggle, kind))
             for kind in KINDS
@@ -1111,6 +1328,7 @@ def refresh_menu():
             icon.update_menu()
         except Exception as e:
             log(f"Не удалось обновить меню: {e}")
+    refresh_panel()
 
 
 def quit_app():

@@ -81,7 +81,8 @@ flowchart TD
 | Главный | Цикл pystray, все обработчики меню |
 | Поток `keyboard` (создаёт сама библиотека) | Хоткеи: `toggle(kind)`, `next_profile`, `apply_profile(name)` |
 | `watch_devices` (daemon) | Раз в 2 с: списки обоих видов и текущие устройства |
-| `PopupManager._run` (daemon) | `tk.Tk()`, popup-ы и окно ввода из очереди |
+| `PopupManager._run` (daemon) | `tk.Tk()`, popup-ы, окно ввода, панель настроек и `call(fn)` из очереди |
+| Короткие потоки панели | `panel_state()` и действия панели |
 | Короткий поток на ответ окна ввода | `save_profile_named(name)` |
 
 | Блокировка | Защищает |
@@ -127,6 +128,22 @@ flowchart TD
 - `install`: `ensure_include` дописывает `Include: MicSwitcher.txt` в `config.txt`, если строки нет; `write_settings` пишет `MicSwitcher.txt` через временный файл. Equalizer APO перечитывает файлы сам.
 - Все пресеты `off` и файла ещё нет - ничего не пишется. Equalizer APO не найден при выставленном пресете - предупреждение.
 - Когда вызывается: выбор пресета, переключение слота, профиль, старт, перечитывание конфига и смена устройства по умолчанию вне MicSwitcher (замечает `watch_devices`).
+
+### Автоустановка (`installer.py` + приложение)
+
+- Версии и SHA-256 закреплены: RNNoise `v1.10` (`win-rnnoise.zip`, из архива берутся только `vst/rnnoise_stereo.dll` и `vst/rnnoise_mono.dll`, одноимённые dll из `.lv2` - другой формат), Equalizer APO `1.4.2` (`EqualizerAPO-x64-1.4.2.exe`, SHA-1 сверен с SourceForge). Несовпадение хэша - файл удаляется, `InstallError`.
+- `install_rnnoise(app_dir, config_dir)`: источник - `<папка приложения>\plugins\rnnoise` (кладёт CI в zip релиза), иначе скачивание. Цель - `<Equalizer APO>\VSTPlugins\RNNoise`. `PermissionError` при копировании - `elevated_copy`: обычный PowerShell запускает PowerShell с `-Verb RunAs -Wait` (окно UAC), скрипт передаётся `-EncodedCommand`; успех проверяется наличием файлов.
+- Приложение: `set_eq` для микрофона с пресетом RNNoise без плагина запускает `install_noise_suppression` в фоне и сам не показывает popup; итог - «Шумодав установлен.» или ошибка. `install_equalizer_apo` скачивает и запускает установщик (`os.startfile`), дальше Configurator и перезагрузка - за пользователем. Обе под `install_lock`: вторая установка параллельно не начнётся.
+- `find_rnnoise` пропускает пути с `.lv2` и `ladspa`.
+
+### Панель настроек (`panel.py` + приложение)
+
+- `Panel` - `tk.Toplevel` в потоке `PopupManager` (`popups.root`), одна на приложение: `open_panel()` через `popups.call` создаёт её или поднимает существующую. Пункт меню «Панель настроек...» - `default=True`, открывается кликом по иконке.
+- Панель не знает про звук: `actions.state()` = `panel_state()` - словарь-снимок (устройства, слоты, текущие, профили, эквалайзер, пороги, хоткеи, автозапуск); `panel_actions()` - `SimpleNamespace` с функциями приложения, виды передаются ключами `"mic"`/`"out"`.
+- Снимок собирается в фоновом потоке (там вызовы звука), отрисовка - `call_ui` в потоке tkinter. Действия (`Panel.do`) - тоже в фоне, после них `request_refresh()`. Плюс автообновление раз в 3 с (10 с для медленной реализации) и `refresh_panel()` из `refresh_menu()`.
+- Поля ввода не перетираются, пока в них фокус; поля хоткеев перерисовываются только когда хоткеи в конфиге изменились.
+- `Choice` - Combobox «подпись - значение»; выбор пользователя (`<<ComboboxSelected>>`) вызывает действие, программная установка - нет.
+- Новые функции приложения для панели: `set_hotkeys(values)`, `set_profile_hotkey(name, combo)`, `set_auto_refresh(enabled)`, `record_hotkey()` (`keyboard.read_hotkey` в фоне).
 
 ### Хоткеи
 
